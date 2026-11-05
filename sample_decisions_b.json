@@ -1,0 +1,10 @@
+[
+  {"action_id": "CASE-01::PRIMARY", "decision": "BLOCKED"},
+  {"action_id": "CASE-02::PRIMARY", "decision": "BLOCKED"},
+  {"action_id": "CASE-03::PRIMARY", "decision": "BLOCKED"},
+  {"action_id": "CASE-04::PRIMARY", "decision": "ALLOW"},
+  {"action_id": "CASE-05::PRIMARY", "decision": "BLOCKED"},
+  {"action_id": "CASE-06::PRIMARY", "decision": "ALLOW"},
+  {"action_id": "CASE-07::PRIMARY", "decision": "BLOCKED"},
+  {"action_id": "CASE-08::PRIMARY", "decision": "ALLOW"}
+]

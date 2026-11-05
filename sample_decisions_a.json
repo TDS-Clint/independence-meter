@@ -1,0 +1,14 @@
+{
+  "protocol_version": "SAMPLE_GATE_0.1",
+  "evaluation_time": "2026-01-01T00:00:00Z",
+  "decisions": [
+    {"action_id": "CASE-01::PRIMARY", "decision": "BLOCKED", "note": "stale upstream"},
+    {"action_id": "CASE-02::PRIMARY", "decision": "BLOCKED", "note": "missing predicate"},
+    {"action_id": "CASE-03::PRIMARY", "decision": "ALLOW",   "note": "fresh + disjoint"},
+    {"action_id": "CASE-04::PRIMARY", "decision": "ALLOW",   "note": "identity-only"},
+    {"action_id": "CASE-05::PRIMARY", "decision": "BLOCKED", "note": "revoked epoch"},
+    {"action_id": "CASE-06::PRIMARY", "decision": "BLOCKED", "note": "over-cautious"},
+    {"action_id": "CASE-07::PRIMARY", "decision": "BLOCKED", "note": "wrong payload"},
+    {"action_id": "CASE-08::PRIMARY", "decision": "ALLOW",   "note": "exact match"}
+  ]
+}

@@ -10,10 +10,14 @@ Standalone tool. Pure Python standard library — no numpy, no network, no
 model calls. Runs anywhere Python 3 runs.
 
 CSV format (header required):
-    item_id, gold, v1, v2, ... vN
+    item_id, gold, v1, v2, ... vN      (with gold)
+    item_id, v1, v2, ... vN            (no gold — precision cannot be computed)
       gold = correct decision: 1 = item SHOULD be flagged, 0 = should pass
       vK   = verifier K's decision: 1 = flagged, 0 = passed
     Positive class = decision == 1 (a flag raised).
+
+    Without a gold column the precision guard cannot run, so independence is
+    NOT certifiable (fail-closed): the tool reports phi_bar / n_eff and exits 2.
 
 Usage:
     python indmeter.py sample_ballots.csv [--min-precision 0.5]
@@ -100,21 +104,32 @@ def precision(vote, gold):
 # CSV loading
 # ---------------------------------------------------------------------------
 def load_ballots(path):
-    """Returns (names, gold, ballots) where names is the verifier column names,
-    gold is a 0/1 list, ballots is a list of 0/1 vectors parallel to names."""
+    """Returns (names, gold, ballots). gold is a 0/1 list, or None when the CSV
+    has no gold column. names is the verifier column names; ballots is a list of
+    0/1 vectors parallel to names.
+
+    Header must start with item_id. If the second column is 'gold' it is the
+    gold column and verifiers follow; otherwise there is no gold and verifiers
+    start at column 2."""
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         header = next(reader, None)
         if not header:
             raise ValueError("empty CSV: no header row")
         header = [h.strip() for h in header]
-        if len(header) < 3 or header[0] != "item_id" or header[1] != "gold":
+        if header[0] != "item_id":
             raise ValueError(
-                "header must be: item_id, gold, v1, v2, ... vN "
-                "(got: %s)" % ", ".join(header)
+                "header must start with item_id (got: %s)" % ", ".join(header)
             )
-        names = header[2:]
-        gold = []
+        has_gold = len(header) >= 2 and header[1] == "gold"
+        first_v = 2 if has_gold else 1
+        names = header[first_v:]
+        if len(names) < 1:
+            raise ValueError(
+                "need at least one verifier column after item_id%s"
+                % (" and gold" if has_gold else "")
+            )
+        gold = [] if has_gold else None
         cols = [[] for _ in names]
         for row in reader:
             if not row or all(c.strip() == "" for c in row):
@@ -123,10 +138,11 @@ def load_ballots(path):
                 raise ValueError(
                     "row %r has %d fields, expected %d" % (row, len(row), len(header))
                 )
-            gold.append(_bit(row[1], "gold"))
+            if has_gold:
+                gold.append(_bit(row[1], "gold"))
             for k in range(len(names)):
-                cols[k].append(_bit(row[2 + k], names[k]))
-    if not gold:
+                cols[k].append(_bit(row[first_v + k], names[k]))
+    if (gold is not None and not gold) or (gold is None and not cols[0]):
         raise ValueError("no data rows")
     return names, gold, cols
 
@@ -144,7 +160,7 @@ def _bit(s, col):
 def run_report(path, min_precision):
     names, gold, ballots = load_ballots(path)
     n = len(names)
-    m = len(gold)
+    m = len(ballots[0]) if ballots else 0
     if n < 2:
         print("need at least 2 verifier columns to measure independence (got %d)" % n)
         return 2
@@ -162,6 +178,16 @@ def run_report(path, min_precision):
         pairs = ", ".join("%s~%s" % (names[i], names[j]) for i, j in degenerate)
         print("  note:       %d pair(s) had a constant margin; phi defined as 0.0 for: %s"
               % (len(degenerate), pairs))
+
+    # No gold -> precision cannot be computed -> fail-closed (not certifiable).
+    if gold is None:
+        print("  precision guard: NO GOLD COLUMN — precision not computable")
+        print()
+        print("NO GOLD — independence NOT certifiable")
+        print("  phi_bar / n_eff are reported above, but without gold labels no")
+        print("  verifier's precision can be checked. Independence without a")
+        print("  precision floor is not certifiable: fail-closed.")
+        return 2
 
     # Precision guard
     print("  precision guard (threshold = %.2f):" % min_precision)

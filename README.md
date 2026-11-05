@@ -92,6 +92,48 @@ phi 0.0, n_eff N; degenerate margin; precision cases). These verify the
 instrument against synthetic ground truth — the sample data is **not** tuned to
 reproduce any external result.
 
+## Ingesting real gate output (`ingest.py`)
+
+`indmeter` eats a ballots CSV; real gates emit decision files. `ingest.py` is a
+pure-stdlib adapter that converts them — **format conversion only, no model
+calls, no scoring.**
+
+It reads decision files in the shape real gates produce — either a list of
+records or an object `{"decisions": [...]}`, each record
+`{"action_id": "<id>", "decision": "BLOCKED"|"ALLOW", ...}` — and joins N of
+them on `action_id` into verifier columns. Positive class = a block/flag:
+`BLOCKED`→1, `ALLOW`→0 (case-insensitive; any other token is an error, never
+guessed).
+
+```
+# two verifiers, with an expected-decision file as gold:
+python ingest.py --out ballots.csv --gold expected_decisions.json \
+      v_a=gate_a_decisions.json v_b=gate_b_decisions.json
+python indmeter.py ballots.csv
+```
+
+**Gold discipline (fail-closed, never synthesized):**
+
+- gold covers every joined item → the `gold` column is emitted; the full
+  precision guard runs.
+- gold missing, or only partial → the CSV is emitted **without** gold and
+  `indmeter` reports `NO GOLD — independence NOT certifiable` and exits 2. Gold
+  is never invented to fill the gap.
+- `--gold-only` → restrict output to the gold-covered subset (with gold), so a
+  partially-labeled run still yields a certifiable subset honestly.
+
+The committed `sample_decisions_a.json`, `sample_decisions_b.json`, and
+`sample_expected.json` are a small **synthetic** example that mirrors the real
+decision-file schema (fictional cases, no system internals). Point `ingest.py`
+at a live gate's decision output and its expected-decision file to run it on
+real data — the schema is the same, so it's a one-liner.
+
+```
+$ python ingest.py --out ballots.csv --gold sample_expected.json \
+      v_a=sample_decisions_a.json v_b=sample_decisions_b.json
+$ python indmeter.py ballots.csv      # -> INDEPENDENCE CERTIFIABLE
+```
+
 ## License
 
 Apache-2.0 (see `LICENSE`). Copyright 2026 Clint Nelson / Snake River AI LLC.
