@@ -2,22 +2,34 @@
 """indmeter — the Independence Meter.
 
 Reads a ballots CSV (N verifiers' 0/1 decisions over M items, plus a gold
-column) and reports how independent the verifiers actually are, with a
-precision guard that refuses to certify independence when a verifier is too
-imprecise to count.
+column) and reports how independent the verifiers actually are.
+
+The independence that governs effective votes is **error-correlation** — how
+often verifiers make the *same mistakes* — not how often they agree. So that is
+the primary metric here. Decision agreement (how often they make the same call,
+right or wrong) is reported too, but only as a secondary diagnostic.
+
+A precision guard refuses to certify independence when a verifier is too
+imprecise to count: a statistically independent voter buys nothing if its flags
+are mostly wrong.
 
 Standalone tool. Pure Python standard library — no numpy, no network, no
 model calls. Runs anywhere Python 3 runs.
 
+Independence is measured **relative to the labeled set you provide**. A reading
+on one set does not generalize to another (a checker can be independent on
+natural text yet correlated on clean fixtures). Always name the set.
+
 CSV format (header required):
     item_id, gold, v1, v2, ... vN      (with gold)
-    item_id, v1, v2, ... vN            (no gold — precision cannot be computed)
+    item_id, v1, v2, ... vN            (no gold — error-correlation uncomputable)
       gold = correct decision: 1 = item SHOULD be flagged, 0 = should pass
       vK   = verifier K's decision: 1 = flagged, 0 = passed
     Positive class = decision == 1 (a flag raised).
 
-    Without a gold column the precision guard cannot run, so independence is
-    NOT certifiable (fail-closed): the tool reports phi_bar / n_eff and exits 2.
+    Error-correlation needs gold (an error is a disagreement with gold). Without
+    gold the independence metric is uncomputable, precision cannot be checked,
+    and the run is NOT certifiable (fail-closed, exit 2).
 
 Usage:
     python indmeter.py sample_ballots.csv [--min-precision 0.5]
@@ -33,9 +45,11 @@ import sys
 # phi coefficient (standard 2x2) and Kish effective-sample-size.
 # The n_eff design-effect form is vendored from the faithfulness-independence
 # repo's neff.py (kish_neff); copied here so this repo has no cross-repo import.
+# phi_pair / phi_bar operate on any list of 0/1 vectors — decision vectors for
+# the secondary diagnostic, error vectors for the primary independence metric.
 # ---------------------------------------------------------------------------
 def phi_pair(a, b):
-    """Phi coefficient between two 0/1 decision vectors of equal length.
+    """Phi coefficient between two 0/1 vectors of equal length.
 
     Returns (phi, degenerate) where degenerate is True when a margin is all-ones
     or all-zeros (denominator 0); phi is defined as 0.0 in that case.
@@ -57,18 +71,17 @@ def phi_pair(a, b):
     return phi, False
 
 
-def phi_bar(ballots):
-    """Mean pairwise phi over all N*(N-1)/2 verifier pairs.
+def phi_bar(vectors):
+    """Mean pairwise phi over all N*(N-1)/2 pairs of 0/1 vectors.
 
-    ballots: list of N decision vectors (each a list of 0/1).
-    Returns (phi_bar, pairs, degenerate_pairs).
+    Returns (phi_bar, pairwise_values, degenerate_pairs).
     """
-    n = len(ballots)
+    n = len(vectors)
     vals = []
     degenerate = []
     for i in range(n):
         for j in range(i + 1, n):
-            p, deg = phi_pair(ballots[i], ballots[j])
+            p, deg = phi_pair(vectors[i], vectors[j])
             vals.append(p)
             if deg:
                 degenerate.append((i, j))
@@ -84,6 +97,11 @@ def kish_neff(n, pb):
     """
     pb_clamped = max(pb, 0.0)
     return n / (1.0 + (n - 1) * pb_clamped)
+
+
+def error_vectors(ballots, gold):
+    """Per verifier, e_i = 1 if its decision disagrees with gold on item i, else 0."""
+    return [[1 if d != g else 0 for d, g in zip(vote, gold)] for vote in ballots]
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +175,12 @@ def _bit(s, col):
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
+def _degenerate_note(names, degenerate, label):
+    pairs = ", ".join("%s~%s" % (names[i], names[j]) for i, j in degenerate)
+    return "    note: %d %s pair(s) had a constant margin; phi defined as 0.0 for: %s" % (
+        len(degenerate), label, pairs)
+
+
 def run_report(path, min_precision):
     names, gold, ballots = load_ballots(path)
     n = len(names)
@@ -165,55 +189,77 @@ def run_report(path, min_precision):
         print("need at least 2 verifier columns to measure independence (got %d)" % n)
         return 2
 
-    pb, vals, degenerate = phi_bar(ballots)
-    neff = kish_neff(n, pb)
-
     print("Independence Meter")
     print("  file:       %s" % path)
     print("  verifiers:  %d  (%s)" % (n, ", ".join(names)))
     print("  items:      %d" % m)
-    print("  phi_bar:    %+.4f  (mean pairwise phi; negative = better than independent)" % pb)
-    print("  n_eff:      %.3f of %d  (Kish; phi_bar clamped to >=0 for n_eff)" % (neff, n))
-    if degenerate:
-        pairs = ", ".join("%s~%s" % (names[i], names[j]) for i, j in degenerate)
-        print("  note:       %d pair(s) had a constant margin; phi defined as 0.0 for: %s"
-              % (len(degenerate), pairs))
+    print("  (independence is measured relative to THIS labeled set; it does not generalize)")
 
-    # No gold -> precision cannot be computed -> fail-closed (not certifiable).
+    # Secondary diagnostic (always available): decision agreement.
+    dpb, dvals, ddeg = phi_bar(ballots)
+
+    # ---- No gold: error-correlation uncomputable -> not certifiable ----
     if gold is None:
-        print("  precision guard: NO GOLD COLUMN — precision not computable")
         print()
-        print("NO GOLD — independence NOT certifiable")
-        print("  phi_bar / n_eff are reported above, but without gold labels no")
-        print("  verifier's precision can be checked. Independence without a")
-        print("  precision floor is not certifiable: fail-closed.")
+        print("  -- secondary diagnostic: decision agreement (NOT independence) --")
+        print("  decision_phi_bar: %+.4f  (how often verifiers make the same call, right or wrong)" % dpb)
+        if ddeg:
+            print(_degenerate_note(names, ddeg, "decision"))
+        print()
+        print("independence NOT certifiable (no gold)")
+        print("  error-correlation (the independence metric) is an error vs gold;")
+        print("  without a gold column it is uncomputable and precision cannot be")
+        print("  checked. Decision agreement above is only a shape hint. Fail-closed.")
         return 2
 
-    # Precision guard
+    # ---- PRIMARY: error-correlation (shared mistakes) ----
+    errs = error_vectors(ballots, gold)
+    epb, evals, edeg = phi_bar(errs)
+    eneff = kish_neff(n, epb)
+    print()
+    print("  == INDEPENDENCE METRIC: error-correlation (shared mistakes) ==")
+    print("  error_phi_bar:                  %+.4f  (mean pairwise phi of error vectors;" % epb)
+    print("                                          <0 = better than independent, 1 = same mistakes)")
+    print("  effective independent verifiers: %.3f of %d  (Kish n_eff; error_phi_bar clamped >=0)"
+          % (eneff, n))
+    if edeg:
+        print(_degenerate_note(names, edeg, "error"))
+
+    # ---- SECONDARY: decision agreement ----
+    print()
+    print("  -- secondary diagnostic: decision agreement (NOT the independence metric) --")
+    print("  decision_phi_bar:               %+.4f  (how often verifiers make the same call," % dpb)
+    print("                                          right or wrong; high even for good judges)")
+    if ddeg:
+        print(_degenerate_note(names, ddeg, "decision"))
+
+    # ---- Precision guard (gold-based; unchanged) ----
+    print()
     print("  precision guard (threshold = %.2f):" % min_precision)
     failed = []
     for k, name in enumerate(names):
         prec, tp, fp = precision(ballots[k], gold)
         if prec is None:
-            print("    %-6s precision=UNDEFINED (raised 0 flags)  -> FAIL" % name)
+            print("    %-8s precision=UNDEFINED (raised 0 flags)  -> FAIL" % name)
             failed.append((name, None))
         else:
             mark = "ok" if prec >= min_precision else "FAIL"
-            print("    %-6s precision=%.3f  (TP=%d FP=%d)  -> %s" % (name, prec, tp, fp, mark))
+            print("    %-8s precision=%.3f  (TP=%d FP=%d)  -> %s" % (name, prec, tp, fp, mark))
             if prec < min_precision:
                 failed.append((name, prec))
 
+    # ---- Verdict ----
     print()
     if failed:
-        parts = []
-        for name, prec in failed:
-            parts.append(name if prec is None else "%s (%.3f)" % (name, prec))
+        parts = [name if prec is None else "%s (%.3f)" % (name, prec) for name, prec in failed]
         print("PRECISION FAIL — independence NOT certifiable")
         print("  below-threshold verifier(s): %s" % ", ".join(parts))
         print("  statistical independence without precision is worthless: an")
         print("  imprecise verifier's 'independent' errors just add noise.")
         return 2
     print("INDEPENDENCE CERTIFIABLE")
+    print("  (per the error-correlation metric above, with every verifier clearing")
+    print("   the precision floor, on this labeled set)")
     return 0
 
 
@@ -229,31 +275,50 @@ def selftest():
         if not cond:
             ok = False
 
-    # two identical verifiers -> phi = 1.0, n_eff -> 1.0
+    # ===== PRIMARY: error-correlation known-answer cases =====
+    # Build decisions + gold so the ERROR vectors are exactly known.
+    # gold fixed; a verifier's error vector = (decision != gold).
+    gold = [1, 1, 1, 1, 0, 0, 0, 0]
+
+    # identical error vectors -> error_phi 1.0, n_eff -> 1.0
+    # two verifiers wrong on exactly the same items (items 0 and 4).
+    vA = [0, 1, 1, 1, 1, 0, 0, 0]  # wrong on 0 and 4
+    vB = [0, 1, 1, 1, 1, 0, 0, 0]  # same
+    eA, eB = error_vectors([vA, vB], gold)
+    p, deg = phi_pair(eA, eB)
+    check("error-corr: identical error vectors -> phi == 1.0", abs(p - 1.0) < 1e-9 and not deg)
+    check("error-corr: identical errors -> n_eff == 1.0", abs(kish_neff(2, p) - 1.0) < 1e-9)
+
+    # independent errors -> phi ~ 0, n_eff -> N.
+    # error vectors eA=[1,1,0,0], eB=[1,0,1,0] over 4 items (balanced 2x2).
+    g4 = [0, 0, 0, 0]
+    wA = [1, 1, 0, 0]  # errors on 0,1
+    wB = [1, 0, 1, 0]  # errors on 0,2
+    eA, eB = error_vectors([wA, wB], g4)
+    p, deg = phi_pair(eA, eB)
+    check("error-corr: independent error vectors -> phi == 0.0", abs(p - 0.0) < 1e-9 and not deg)
+    check("error-corr: independent errors -> n_eff == N", abs(kish_neff(2, p) - 2.0) < 1e-9)
+
+    # anti-correlated errors -> phi == -1.0 (one wrong exactly when the other is right)
+    g4b = [0, 0, 0, 0]
+    aA = [1, 1, 0, 0]  # errors on 0,1
+    aB = [0, 0, 1, 1]  # errors on 2,3
+    eA, eB = error_vectors([aA, aB], g4b)
+    p, deg = phi_pair(eA, eB)
+    check("error-corr: anti-correlated errors -> phi == -1.0", abs(p - (-1.0)) < 1e-9 and not deg)
+
+    # ===== SECONDARY: decision-agreement known-answer cases (relabeled) =====
     a = [1, 0, 1, 0, 1, 1, 0, 0]
-    p, deg = phi_pair(a, a)
-    check("identical verifiers: phi == 1.0", abs(p - 1.0) < 1e-9 and not deg)
-    check("identical verifiers: n_eff == 1.0", abs(kish_neff(2, p) - 1.0) < 1e-9)
-
-    # two perfectly anti-correlated verifiers -> phi = -1.0
+    p, _ = phi_pair(a, a)
+    check("decision-agreement: identical decisions -> phi == 1.0", abs(p - 1.0) < 1e-9)
     b = [0, 1, 0, 1, 0, 0, 1, 1]
-    p, deg = phi_pair(a, b)
-    check("anti-correlated verifiers: phi == -1.0", abs(p - (-1.0)) < 1e-9 and not deg)
-    # negative phi_bar clamps -> n_eff == N (no penalty, no bonus)
-    check("anti-correlated: n_eff == N (clamped)", abs(kish_neff(2, p) - 2.0) < 1e-9)
-
-    # two statistically independent verifiers -> phi ~ 0, n_eff ~ N.
-    # Construct an exact zero: a balanced 2x2 with n11=n10=n01=n00.
-    ia = [1, 1, 0, 0]
-    ib = [1, 0, 1, 0]
-    p, deg = phi_pair(ia, ib)
-    check("independent verifiers: phi == 0.0", abs(p - 0.0) < 1e-9 and not deg)
-    check("independent verifiers: n_eff == N", abs(kish_neff(2, p) - 2.0) < 1e-9)
+    p, _ = phi_pair(a, b)
+    check("decision-agreement: opposite decisions -> phi == -1.0", abs(p - (-1.0)) < 1e-9)
+    p, _ = phi_pair([1, 1, 0, 0], [1, 0, 1, 0])
+    check("decision-agreement: independent decisions -> phi == 0.0", abs(p - 0.0) < 1e-9)
 
     # degenerate margin -> phi defined as 0.0, flagged degenerate
-    const = [1, 1, 1, 1]
-    varied = [1, 0, 1, 0]
-    p, deg = phi_pair(const, varied)
+    p, deg = phi_pair([1, 1, 1, 1], [1, 0, 1, 0])
     check("constant margin: phi == 0.0 and flagged degenerate", p == 0.0 and deg)
 
     # precision guard math
@@ -270,7 +335,7 @@ def selftest():
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="indmeter",
-        description="Measure verifier independence with a precision guard.",
+        description="Measure verifier independence (error-correlation) with a precision guard.",
     )
     ap.add_argument("csv", nargs="?", help="ballots CSV (item_id, gold, v1..vN)")
     ap.add_argument("--min-precision", type=float, default=0.5,
